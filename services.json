@@ -17,9 +17,9 @@
       "monitor_logs": true,
       "log_tail_lines": 100,
       "permissions": {
-        "fix": false,
-        "user": "nginx-app",
-        "group": "nginx-app"
+        "fix": true,
+        "user": "jordan",
+        "group": "jordan"
       },
       "custom_settings": {
         "web_root": "/var/www/html",
