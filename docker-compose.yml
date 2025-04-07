@@ -51,5 +51,7 @@ networks:
     driver: bridge
 
 volumes:
-  config_data:
+  watcher_data:
+    driver: local
+  watcher_logs:
     driver: local
