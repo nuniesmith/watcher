@@ -16,8 +16,8 @@ services:
       - APP_VERSION=${APP_VERSION:-1.0.0}
       - APP_ENV=${APP_ENV:-production}
       - DOCKER_COMPOSE_CMD=${DOCKER_COMPOSE_CMD:-docker compose}
-      - USER_ID=${USER_ID:-1000}
-      - GROUP_ID=${GROUP_ID:-1000}
+      - USER_ID=${USER_ID:-1001}
+      - GROUP_ID=${GROUP_ID:-1001}
       - DEBUG=${DEBUG:-false}
       - SERVICES_CONFIG=/app/services.json
       - CONFIG_DIR=/app/config
