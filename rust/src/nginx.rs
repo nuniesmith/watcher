@@ -1,12 +1,13 @@
 use anyhow::{anyhow, Context, Result};
-use log::{debug, info, warn};
+use log::{info, warn};
 use regex::Regex;
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::{PathBuf};
 use tokio::process::Command;
 use walkdir::WalkDir;
+use async_trait::async_trait;
 
 use crate::config::{GlobalSettings, Permissions, ServiceConfig, ServiceType, nginx::Config as NginxConfig};
 use crate::docker_utils::{
@@ -56,7 +57,6 @@ async fn restart_nginx_with_compose(config: &NginxConfig) -> Result<()> {
 /// Check Nginx logs for errors
 pub async fn check_nginx_logs(config: &NginxConfig) -> Result<()> {
     if !config.monitor_logs {
-        debug!("Log monitoring is disabled");
         return Ok(());
     }
     
@@ -93,8 +93,6 @@ pub async fn check_nginx_logs(config: &NginxConfig) -> Result<()> {
         if count_403 > 0 {
             warn!("Found {} '403 Forbidden' errors - check directory permissions and index files", count_403);
         }
-    } else {
-        debug!("No errors found in recent Nginx logs");
     }
     
     Ok(())
@@ -207,9 +205,8 @@ impl<'a> NginxService<'a> {
             let path = entry.path();
             
             if path.is_file() {
-                let file_name = path.file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy();
+                let file_name_os = entry.file_name();
+                let file_name = file_name_os.to_string_lossy();
                 
                 if file_name == "nginx.conf" || file_name.ends_with(".conf") {
                     config_files.push(path.to_path_buf());
@@ -223,7 +220,6 @@ impl<'a> NginxService<'a> {
     /// Analyze and fix common Nginx configuration issues
     pub async fn fix_common_issues(&self) -> Result<()> {
         if !self.service.effective_auto_fix(self.global.auto_fix) {
-            debug!("[{}] Auto-fix disabled, skipping issue fixing", self.service.name);
             return Ok(());
         }
         
@@ -243,11 +239,6 @@ impl<'a> NginxService<'a> {
         let enable_dir_listing = self.custom_settings.get("enable_dir_listing")
             .map(|v| v == "true")
             .unwrap_or(false);
-        
-        // Get web root 
-        let web_root = self.custom_settings.get("web_root")
-            .unwrap_or(&"/var/www/html".to_string())
-            .clone();
         
         // Check for common issues and fix them
         for config_file in &config_files {
@@ -289,11 +280,13 @@ impl<'a> NginxService<'a> {
                     }
                     
                     if path.is_dir() {
+                        // Fix: Extend lifetime of file_name
                         let has_index = fs::read_dir(&path)
                             .context(format!("Failed to read directory: {}", path.display()))?
                             .filter_map(Result::ok)
                             .any(|entry| {
-                                let name = entry.file_name().to_string_lossy();
+                                let name_binding = entry.file_name();
+                                let name = name_binding.to_string_lossy();
                                 name.starts_with("index.")
                             });
                         
@@ -319,7 +312,6 @@ impl<'a> NginxService<'a> {
     /// Fix permissions for Nginx files
     pub async fn fix_permissions(&self) -> Result<()> {
         if !self.service.effective_fix_permissions(self.global.fix_permissions) {
-            debug!("[{}] Permission fixing is disabled", self.service.name);
             return Ok(());
         }
         
@@ -582,7 +574,6 @@ impl<'a> NginxService<'a> {
     /// Monitor Nginx logs
     pub async fn monitor_logs(&self) -> Result<Vec<String>> {
         if !self.service.effective_monitor_logs(self.global.monitor_logs) {
-            debug!("[{}] Log monitoring is disabled", self.service.name);
             return Ok(vec![]);
         }
         
@@ -654,6 +645,7 @@ pub async fn fix_nginx_permissions(service: &ServiceConfig, global: &GlobalSetti
 }
 
 /// ServiceHandler trait for polymorphic service operations
+#[async_trait]
 pub trait ServiceHandler {
     async fn validate(&self) -> Result<bool>;
     async fn fix_issues(&self) -> Result<()>;
@@ -662,6 +654,7 @@ pub trait ServiceHandler {
 }
 
 /// Implement the ServiceHandler trait for NginxService
+#[async_trait]
 impl<'a> ServiceHandler for NginxService<'a> {
     async fn validate(&self) -> Result<bool> {
         self.validate_config().await
