@@ -18,8 +18,8 @@
       "log_tail_lines": 100,
       "permissions": {
         "fix": true,
-        "user": "nginx",
-        "group": "nginx"
+        "user": "nginx-app",
+        "group": "nginx-app"
       },
       "custom_settings": {
         "web_root": "/var/www/html",
