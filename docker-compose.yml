@@ -10,6 +10,7 @@ services:
         APP_VERSION: ${APP_VERSION:-1.0.0}
         APP_ENV: ${APP_ENV:-production}
         BUILD_DATE: ${BUILD_DATE:-$(date -u +'%Y-%m-%dT%H:%M:%SZ')}
+        DOCKER_GID: 986
     environment:
       - REPO_URL=${REPO_URL:-"https://github.com/nuniesmith/nginx.git"}
       - BRANCH=${BRANCH:-main}

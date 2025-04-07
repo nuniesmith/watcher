@@ -37,7 +37,7 @@ FROM alpine:latest
 ARG APP_VERSION=1.0.0
 ARG APP_ENV=production
 ARG BUILD_DATE="unknown"
-ARG DOCKER_GID=954
+ARG DOCKER_GID=986
 # Create a non-root user for better security
 RUN addgroup -S watcher && \
     adduser -S -G watcher watcher
