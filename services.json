@@ -1,31 +1,109 @@
 {
-    "services": [
-      {
-        "name": "nginx",
-        "container_name": "nginx_app",
-        "repo_url": "https://github.com/nuniesmith/nginx.git",
-        "branch": "main",
-        "local_path": "/app/config/nginx",
-        "use_docker_compose": false,
-        "docker_compose_file": "",
-        "restart_command": "docker restart nginx_app",
-        "validation_command": "docker exec -t nginx_app nginx -t",
-        "permissions": {
-          "fix": true,
-          "user": "nginx",
-          "group": "nginx"
-        },
-        "monitor_logs": true
-    }
-
-    ],
-    "global_settings": {
-      "watch_interval": 60,
-      "default_branch": "main",
-      "auto_fix": true,
-      "fix_permissions": true,
+  "services": [
+    {
+      "name": "nginx",
+      "container_name": "nginx_app",
+      "service_type": "nginx",
+      "repo_url": "https://github.com/nuniesmith/nginx.git",
+      "branch": "main",
+      "local_path": "/app/config/nginx",
+      "use_docker_compose": false,
+      "docker_compose_file": null,
+      "restart_command": "docker restart nginx_app",
+      "validation_command": "docker exec -t nginx_app nginx -t",
       "disable_restart": false,
-      "startup_grace_period": "30s",
-      "ssh_key_path": "/home/watcher/.ssh/id_rsa"
+      "healthcheck_url": "https://hc-ping.com/your-nginx-check-id",
+      "auto_fix": true,
+      "monitor_logs": true,
+      "log_tail_lines": 100,
+      "permissions": {
+        "fix": true,
+        "user": "nginx",
+        "group": "nginx"
+      },
+      "custom_settings": {
+        "web_root": "/var/www/html",
+        "enable_dir_listing": false,
+        "security_headers": true,
+        "ssl_enabled": true,
+        "default_site_enabled": true,
+        "config_test_before_restart": true
+      }
+    },
+    {
+      "name": "api",
+      "container_name": "api_service",
+      "service_type": "custom",
+      "repo_url": "https://github.com/nuniesmith/api.git",
+      "branch": "develop",
+      "local_path": "/app/config/api",
+      "use_docker_compose": true,
+      "docker_compose_file": "docker-compose.yml",
+      "restart_command": "docker compose -f /app/config/api/docker-compose.yml restart api_service",
+      "validation_command": "docker exec -t api_service /app/scripts/validate-config.sh",
+      "disable_restart": false,
+      "healthcheck_url": "https://hc-ping.com/your-api-check-id",
+      "auto_fix": true,
+      "monitor_logs": true,
+      "log_tail_lines": 200,
+      "permissions": {
+        "fix": true,
+        "user": "app",
+        "group": "app"
+      },
+      "custom_settings": {
+        "config_dir": "/app/config",
+        "env_file": ".env.production",
+        "port": 3000,
+        "rate_limit": 100
+      }
+    },
+    {
+      "name": "database",
+      "container_name": "postgres_db",
+      "service_type": "generic",
+      "repo_url": "https://github.com/nuniesmith/db-config.git",
+      "branch": "main",
+      "local_path": "/app/config/db",
+      "use_docker_compose": true,
+      "docker_compose_file": "/path/to/compose.yml",
+      "restart_command": "docker compose -f /path/to/compose.yml restart postgres_db",
+      "validation_command": "docker exec -t postgres_db pg_isready -U postgres",
+      "disable_restart": false,
+      "healthcheck_url": "https://hc-ping.com/your-db-check-id",
+      "auto_fix": false,
+      "monitor_logs": true,
+      "log_tail_lines": 50,
+      "permissions": {
+        "fix": true,
+        "user": "postgres",
+        "group": "postgres"
+      },
+      "custom_settings": {
+        "data_dir": "/var/lib/postgresql/data",
+        "backup_enabled": true,
+        "max_connections": 100,
+        "timeout_seconds": 30
+      }
     }
+  ],
+  "global_settings": {
+    "watch_interval": 60,
+    "default_branch": "main",
+    "auto_fix": false,
+    "fix_permissions": true,
+    "monitor_logs": true,
+    "disable_restart": false,
+    "use_docker_compose": false,
+    "startup_grace_period": "30s",
+    "ssh_key_path": "/home/watcher/.ssh/id_rsa",
+    "log_file": "/var/log/watcher.log",
+    "verbose": true,
+    "lockfile": "/var/run/config_watcher.lock",
+    "timeout_seconds": 30,
+    "max_memory_mb": 500,
+    "healthcheck_timeout": 10,
+    "retry_attempts": 3,
+    "retry_delay": "5s"
   }
+}

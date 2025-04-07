@@ -25,8 +25,8 @@ RUN cargo build --release
 # Copy the compiled binary to a specific location
 COPY ./services.json /app/services.json
 # Create healthcheck and entrypoint scripts
-COPY ./docker/healthcheck.sh /app/healthcheck.sh
-COPY ./docker/entrypoint.sh /app/entrypoint.sh
+COPY ./scripts/healthcheck.sh /app/healthcheck.sh
+COPY ./scripts/entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/healthcheck.sh /app/entrypoint.sh
 
 # -----------------------------
@@ -56,20 +56,20 @@ RUN apk update && \
     jq
 # Set up docker group with same GID as host, handling potential GID conflicts
 RUN if getent group ${DOCKER_GID}; then \
-        existing_group=$(getent group ${DOCKER_GID} | cut -d: -f1); \
-        echo "Warning: GID ${DOCKER_GID} already exists as group '${existing_group}'"; \
-        if [ "${existing_group}" != "docker" ]; then \
-            echo "Creating docker group with system-assigned GID and adding watcher user"; \
-            addgroup docker && adduser watcher docker; \
-            echo "Warning: Using system-assigned GID for docker group instead of ${DOCKER_GID}"; \
-            echo "This might cause permission issues with the host's Docker socket"; \
-        else \
-            echo "Docker group already exists with GID ${DOCKER_GID}, adding watcher user to it"; \
-            adduser watcher docker; \
-        fi; \
+    existing_group=$(getent group ${DOCKER_GID} | cut -d: -f1); \
+    echo "Warning: GID ${DOCKER_GID} already exists as group '${existing_group}'"; \
+    if [ "${existing_group}" != "docker" ]; then \
+    echo "Creating docker group with system-assigned GID and adding watcher user"; \
+    addgroup docker && adduser watcher docker; \
+    echo "Warning: Using system-assigned GID for docker group instead of ${DOCKER_GID}"; \
+    echo "This might cause permission issues with the host's Docker socket"; \
     else \
-        echo "Creating docker group with GID ${DOCKER_GID}"; \
-        addgroup -g ${DOCKER_GID} docker && adduser watcher docker; \
+    echo "Docker group already exists with GID ${DOCKER_GID}, adding watcher user to it"; \
+    adduser watcher docker; \
+    fi; \
+    else \
+    echo "Creating docker group with GID ${DOCKER_GID}"; \
+    addgroup -g ${DOCKER_GID} docker && adduser watcher docker; \
     fi
 # Create app directory and config directory with proper permissions
 WORKDIR /app
@@ -87,15 +87,15 @@ RUN git config --global --add safe.directory ${CONFIG_DIR} && \
     git config --global advice.detachedHead false && \
     git config --global pull.rebase false
 # Copy the compiled Rust application, healthcheck, and entrypoint scripts
-COPY --from=watcher-builder /app/target/release/config-watcher /usr/local/bin/
+COPY --from=watcher-builder /app/target/release/watcher /usr/local/bin/
 COPY --from=watcher-builder /app/healthcheck.sh /usr/local/bin/healthcheck.sh
 COPY --from=watcher-builder /app/entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY --from=watcher-builder /app/services.json /app/services.json
 # Make sure scripts are executable and have correct ownership
-RUN chmod +x /usr/local/bin/config-watcher \
+RUN chmod +x /usr/local/bin/watcher \
     /usr/local/bin/healthcheck.sh \
     /usr/local/bin/entrypoint.sh && \
-    chown watcher:watcher /usr/local/bin/config-watcher
+    chown watcher:watcher /usr/local/bin/watcher
 # Define default environment variables
 ENV SERVICES_CONFIG="/app/services.json" \
     WATCH_INTERVAL=60 \
@@ -107,7 +107,7 @@ ENV SERVICES_CONFIG="/app/services.json" \
     DISABLE_RESTART="false" \
     STARTUP_GRACE_PERIOD="30s"
 # Label the image with metadata
-LABEL org.opencontainers.image.title="config-watcher" \
+LABEL org.opencontainers.image.title="watcher" \
     org.opencontainers.image.version="${APP_VERSION}" \
     org.opencontainers.image.description="Config watcher service for monitoring and updating configurations from Git" \
     org.opencontainers.image.created="${BUILD_DATE}" \

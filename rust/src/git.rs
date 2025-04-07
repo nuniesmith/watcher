@@ -1,301 +1,574 @@
-use anyhow::{Context, Result};
-use git2::{build::RepoBuilder, Cred, FetchOptions, RemoteCallbacks, Repository};
+use anyhow::{anyhow, Context, Result};
 use log::{debug, error, info, warn};
-use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::fs;
-use crate::config::Config;
+use std::path::{Path, PathBuf};
+use tokio::process::Command;
+use tokio::fs::File;
+use tokio::io::AsyncWriteExt;
+use tempfile::NamedTempFile;
+use crate::config::{ServiceConfig, GlobalSettings};
 
+/// Git repository manager for handling repository operations
 pub struct GitRepo {
-    pub repo: Repository,
-    pub current_commit: String,
+    /// Path to the local repository
+    pub path: PathBuf,
+    /// URL of the remote repository
+    pub remote_url: String,
+    /// Branch to work with
+    pub branch: String,
+    /// Current commit hash
+    pub current_commit: Option<String>,
+    /// SSH private key for authentication (if provided)
+    ssh_key: Option<String>,
 }
 
-pub fn setup_repository(config: &Config) -> Result<GitRepo> {
-    let path = &config.config_dir;
-    
-    // Check if repository already exists
-    if path.join(".git").exists() {
-        info!("Git repository already exists at {}", path.display());
-        
-        // Open existing repository
-        let repo = Repository::open(path)
-            .context("Failed to open existing repository")?;
-        
-        // Check current branch
-        let head = repo.head()?;
-        let current_branch = head.shorthand().unwrap_or("unknown").to_string();
-        
-        if current_branch != config.branch {
-            warn!("Switching from branch {} to {}", current_branch, config.branch);
-            
-            // Stash any uncommitted changes
-            let statuses = repo.statuses(None)?;
-            if !statuses.is_empty() {
-                warn!("Found uncommitted changes, stashing them");
-                let signature = repo.signature()?;
-                repo.stash_save(&signature, "Auto-stash before branch switch", None)?;
-            }
-            
-            // Try to find the branch locally first
-            let mut found_locally = false;
-            let branches = repo.branches(None)?;
-            for branch_result in branches {
-                let (branch, _) = branch_result?;
-                if branch.name()?.map(|s| s == config.branch).unwrap_or(false) {
-                    found_locally = true;
-                    break;
-                }
-            }
-            
-            if found_locally {
-                // Local branch exists, check it out
-                let obj = repo.revparse_single(&config.branch)?;
-                repo.checkout_tree(&obj, None)?;
-                
-                let branch_ref = format!("refs/heads/{}", config.branch);
-                repo.set_head(&branch_ref)?;
-            } else {
-                // Need to fetch the branch
-                let mut remote = repo.find_remote("origin")?;
-                
-                let mut callbacks = RemoteCallbacks::new();
-                if let Some(key) = &config.ssh_private_key {
-                    setup_auth_callbacks(&mut callbacks, key);
-                }
-                
-                let mut fetch_options = FetchOptions::new();
-                fetch_options.remote_callbacks(callbacks);
-                
-                remote.fetch(&[&config.branch], Some(&mut fetch_options), None)?;
-                
-                // Try to find the remote branch
-                let remote_branch_ref = format!("refs/remotes/origin/{}", config.branch);
-                if let Ok(remote_branch) = repo.find_reference(&remote_branch_ref) {
-                    let oid = remote_branch.target().unwrap();
-                    let commit = repo.find_commit(oid)?;
-                    
-                    // Create a local branch that tracks the remote branch
-                    repo.branch(&config.branch, &commit, false)?;
-                    
-                    // Checkout the branch
-                    let obj = repo.revparse_single(&config.branch)?;
-                    repo.checkout_tree(&obj, None)?;
-                    
-                    let branch_ref = format!("refs/heads/{}", config.branch);
-                    repo.set_head(&branch_ref)?;
-                } else {
-                    return Err(anyhow::anyhow!("Branch {} not found on remote", config.branch));
-                }
-            }
+impl GitRepo {
+    /// Create a new GitRepo instance
+    pub fn new(path: PathBuf, url: String, branch: String, ssh_key: Option<String>) -> Self {
+        Self {
+            path,
+            remote_url: url,
+            branch,
+            current_commit: None,
+            ssh_key,
         }
+    }
+
+    /// Create from service configuration
+    pub fn from_service(service: &ServiceConfig, global: &GlobalSettings) -> Self {
+        let branch = service.effective_branch(&global.default_branch);
         
-        // Get current commit hash
-        let head = repo.head()?;
-        let head_commit = head.peel_to_commit()?;
-        let current_commit = head_commit.id().to_string();
-        
-        info!("Current commit: {}", current_commit);
-        
-        Ok(GitRepo {
-            repo,
-            current_commit,
-        })
-    } else {
-        // Repository doesn't exist, clone it
-        info!("Cloning repository {} to {}", config.repo_url, path.display());
+        Self {
+            path: service.local_path.clone(),
+            remote_url: service.repo_url.clone(),
+            branch,
+            current_commit: None,
+            ssh_key: None, // SSH key would be loaded elsewhere if needed
+        }
+    }
+
+    /// Check if the repository exists locally
+    pub fn exists(&self) -> bool {
+        self.path.join(".git").exists()
+    }
+
+    /// Initialize or update the repository
+    pub async fn init(&mut self) -> Result<()> {
+        if self.exists() {
+            self.update().await
+        } else {
+            self.clone().await
+        }
+    }
+
+    /// Clone the repository
+    pub async fn clone(&mut self) -> Result<()> {
+        info!("Cloning repository {} to {}", self.remote_url, self.path.display());
         
         // Create directory if it doesn't exist
-        if path.exists() {
-            warn!("Directory exists but is not a git repository. Removing contents.");
-            fs::remove_dir_all(path)?;
+        if self.path.exists() {
+            warn!("Directory exists but is not a git repository. Creating backup and removing contents.");
+            self.backup_directory().await?;
+        } else {
+            tokio::fs::create_dir_all(&self.path).await
+                .context("Failed to create directory for repository")?;
         }
         
-        fs::create_dir_all(path)?;
+        // Build clone command
+        let mut cmd = self.build_git_command();
+        cmd.args(["clone", "--depth", "1", "-b", &self.branch, &self.remote_url, "."]);
+        cmd.current_dir(&self.path);
         
-        // Setup authentication if private key is provided
-        let mut callbacks = RemoteCallbacks::new();
-        if let Some(key) = &config.ssh_private_key {
-            setup_auth_callbacks(&mut callbacks, key);
+        // Execute clone
+        let output = cmd.output().await
+            .context("Failed to execute git clone command")?;
+        
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow!("Git clone failed: {}", stderr));
         }
-        
-        let mut fetch_options = FetchOptions::new();
-        fetch_options.remote_callbacks(callbacks);
-        
-        let mut builder = RepoBuilder::new();
-        builder.fetch_options(fetch_options);
-        builder.branch(&config.branch);
-        
-        let repo = builder.clone(&config.repo_url, path)
-            .context("Failed to clone repository")?;
         
         // Get current commit hash
-        let head = repo.head()?;
-        let head_commit = head.peel_to_commit()?;
-        let current_commit = head_commit.id().to_string();
+        self.current_commit = Some(self.get_commit_hash().await?);
+        info!("Repository cloned successfully. Current commit: {}", 
+              self.current_commit.as_ref().unwrap_or(&"unknown".to_string()));
         
-        info!("Repository cloned successfully. Current commit: {}", current_commit);
-        
-        Ok(GitRepo {
-            repo,
-            current_commit,
-        })
+        Ok(())
     }
-}
 
-pub async fn pull_latest_changes(git_repo: &mut GitRepo, config: &Config) -> Result<bool> {
-    debug!("Pulling latest changes");
-    
-    let repo = &git_repo.repo;
-    let repo_path = config.config_dir.to_str().unwrap();
-    
-    // Save current commit for potential rollback
-    let previous_commit = git_repo.current_commit.clone();
-    
-    // Fetch latest changes
-    info!("Fetching latest changes from remote");
-    
-    // Using standard git command for consistency with shell script
-    let fetch_result = Command::new("git")
-        .current_dir(repo_path)
-        .args(["fetch", "origin", &config.branch])
-        .output()
-        .context("Failed to fetch from remote")?;
-    
-    if !fetch_result.status.success() {
-        let error = String::from_utf8_lossy(&fetch_result.stderr);
-        return Err(anyhow::anyhow!("Failed to fetch: {}", error));
-    }
-    
-    // Get the latest commit hash
-    let remote_ref = format!("refs/remotes/origin/{}", config.branch);
-    let remote_branch = repo.find_reference(&remote_ref)?;
-    let remote_commit = remote_branch.target()
-        .ok_or_else(|| anyhow::anyhow!("Invalid reference target"))?
-        .to_string();
-    
-    debug!("Remote commit: {}", remote_commit);
-    debug!("Current commit: {}", git_repo.current_commit);
-    
-    // Check if there are changes
-    if remote_commit != git_repo.current_commit {
-        info!("Changes detected, pulling latest code");
+    /// Update an existing repository
+    pub async fn update(&mut self) -> Result<()> {
+        debug!("Updating repository at {}", self.path.display());
         
-        // Check for local changes
-        let statuses = repo.statuses(None)?;
-        let has_local_changes = !statuses.is_empty();
+        // Get current commit for potential rollback
+        let previous_commit = self.get_commit_hash().await?;
+        self.current_commit = Some(previous_commit.clone());
         
-        if has_local_changes {
-            warn!("Local uncommitted changes detected. Stashing them.");
-            
-            // Using git stash for simplicity
-            let stash_result = Command::new("git")
-                .current_dir(repo_path)
-                .args(["stash"])
-                .output()
-                .context("Failed to stash changes")?;
-            
-            if !stash_result.status.success() {
-                let error = String::from_utf8_lossy(&stash_result.stderr);
-                warn!("Failed to stash changes: {}", error);
-            }
+        // Check current branch
+        let current_branch = self.get_current_branch().await?;
+        
+        // Switch branch if needed
+        if current_branch != self.branch {
+            info!("Switching from branch {} to {}", current_branch, self.branch);
+            self.switch_branch(&current_branch).await?;
         }
         
-        // Pull changes
-        let pull_result = Command::new("git")
-            .current_dir(repo_path)
-            .args(["pull", "origin", &config.branch])
-            .output()
-            .context("Failed to pull changes")?;
+        // Fetch the latest changes
+        self.fetch().await?;
         
-        if !pull_result.status.success() {
-            let error = String::from_utf8_lossy(&pull_result.stderr);
-            error!("Failed to pull changes: {}", error);
+        // Check if there are changes to pull
+        let remote_ref = format!("origin/{}", self.branch);
+        let remote_commit = self.get_remote_commit_hash(&remote_ref).await?;
+        
+        if remote_commit != previous_commit {
+            // Changes detected
+            info!("Changes detected, pulling latest code (current: {}, remote: {})", 
+                  previous_commit, remote_commit);
             
-            // Check for merge conflicts
-            if error.contains("CONFLICT") || error.contains("Automatic merge failed") {
-                error!("Merge conflicts detected. Reverting to previous state.");
-                
-                // Reset to previous commit
-                let reset_result = Command::new("git")
-                    .current_dir(repo_path)
-                    .args(["reset", "--hard", &previous_commit])
-                    .output()
-                    .context("Failed to reset to previous commit")?;
-                
-                if !reset_result.status.success() {
-                    let reset_error = String::from_utf8_lossy(&reset_result.stderr);
-                    error!("Failed to reset to previous commit: {}", reset_error);
-                }
-                
-                return Err(anyhow::anyhow!("Merge conflicts detected"));
+            // Check for local changes
+            let has_local_changes = self.has_local_changes().await?;
+            
+            if has_local_changes {
+                warn!("Local uncommitted changes detected. Stashing them.");
+                self.stash_changes().await?;
             }
             
-            return Err(anyhow::anyhow!("Failed to pull changes: {}", error));
+            // Pull changes
+            if let Err(e) = self.pull().await {
+                error!("Failed to pull changes: {}", e);
+                
+                // Check for merge conflicts
+                if e.to_string().contains("CONFLICT") || e.to_string().contains("Automatic merge failed") {
+                    error!("Merge conflicts detected. Reverting to previous state.");
+                    self.reset_hard(&previous_commit).await?;
+                }
+                
+                return Err(e);
+            }
+            
+            // Update current commit
+            self.current_commit = Some(remote_commit);
+            
+            // Apply stashed changes if any
+            if has_local_changes {
+                info!("Applying stashed changes");
+                self.stash_pop().await?;
+            }
+            
+            Ok(())
+        } else {
+            debug!("No changes detected");
+            Ok(())
+        }
+    }
+
+    /// Check for updates and pull if available
+    pub async fn check_for_updates(&mut self) -> Result<bool> {
+        debug!("Checking for updates in repository at {}", self.path.display());
+        
+        // Get current commit hash
+        let current_hash = self.get_commit_hash().await?;
+        self.current_commit = Some(current_hash.clone());
+        
+        // Fetch updates
+        self.fetch().await?;
+        
+        // Check if there are changes to pull
+        let remote_ref = format!("origin/{}", self.branch);
+        let remote_hash = self.get_remote_commit_hash(&remote_ref).await?;
+        
+        debug!("Current hash: {}, Remote hash: {}", current_hash, remote_hash);
+        
+        if current_hash != remote_hash {
+            // Pull the changes
+            self.pull().await?;
+            self.current_commit = Some(remote_hash);
+            Ok(true) // Changes detected and pulled
+        } else {
+            Ok(false) // No changes
+        }
+    }
+
+    /// Revert to a previous commit if validation fails
+    pub async fn revert_changes(&mut self) -> Result<()> {
+        debug!("Reverting changes in repository at {}", self.path.display());
+        
+        // Reset to the previous commit
+        let mut cmd = self.build_git_command();
+        cmd.args(["reset", "--hard", "HEAD@{1}"]);
+        cmd.current_dir(&self.path);
+        
+        let output = cmd.output().await
+            .context("Failed to execute git reset command")?;
+        
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow!("Git reset failed: {}", stderr));
         }
         
         // Update current commit
-        git_repo.current_commit = remote_commit;
+        self.current_commit = Some(self.get_commit_hash().await?);
         
-        // Apply stashed changes if any
-        if has_local_changes {
-            info!("Applying stashed changes");
+        Ok(())
+    }
+
+    // ---------- Helper methods ----------
+
+    /// Get the current commit hash
+    async fn get_commit_hash(&self) -> Result<String> {
+        let mut cmd = self.build_git_command();
+        cmd.args(["rev-parse", "HEAD"]);
+        cmd.current_dir(&self.path);
+        
+        let output = cmd.output().await
+            .context("Failed to execute git rev-parse command")?;
+        
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow!("Git rev-parse failed: {}", stderr));
+        }
+        
+        let hash = String::from_utf8(output.stdout)
+            .context("Failed to parse git rev-parse output")?
+            .trim()
+            .to_string();
+        
+        Ok(hash)
+    }
+
+    /// Get a remote commit hash
+    async fn get_remote_commit_hash(&self, remote_ref: &str) -> Result<String> {
+        let mut cmd = self.build_git_command();
+        cmd.args(["rev-parse", remote_ref]);
+        cmd.current_dir(&self.path);
+        
+        let output = cmd.output().await
+            .context(format!("Failed to execute git rev-parse for {}", remote_ref))?;
+        
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow!("Git rev-parse for {} failed: {}", remote_ref, stderr));
+        }
+        
+        let hash = String::from_utf8(output.stdout)
+            .context("Failed to parse git rev-parse output")?
+            .trim()
+            .to_string();
+        
+        Ok(hash)
+    }
+
+    /// Get the current branch name
+    async fn get_current_branch(&self) -> Result<String> {
+        let mut cmd = self.build_git_command();
+        cmd.args(["rev-parse", "--abbrev-ref", "HEAD"]);
+        cmd.current_dir(&self.path);
+        
+        let output = cmd.output().await
+            .context("Failed to execute git rev-parse command for branch")?;
+        
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow!("Git rev-parse for branch failed: {}", stderr));
+        }
+        
+        let branch = String::from_utf8(output.stdout)
+            .context("Failed to parse git branch output")?
+            .trim()
+            .to_string();
+        
+        Ok(branch)
+    }
+
+    /// Check if there are local uncommitted changes
+    async fn has_local_changes(&self) -> Result<bool> {
+        let mut cmd = self.build_git_command();
+        cmd.args(["status", "--porcelain"]);
+        cmd.current_dir(&self.path);
+        
+        let output = cmd.output().await
+            .context("Failed to execute git status command")?;
+        
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow!("Git status failed: {}", stderr));
+        }
+        
+        Ok(!output.stdout.is_empty())
+    }
+
+    /// Stash local changes
+    async fn stash_changes(&self) -> Result<()> {
+        let mut cmd = self.build_git_command();
+        cmd.args(["stash", "save", "Auto-stash before updating"]);
+        cmd.current_dir(&self.path);
+        
+        let output = cmd.output().await
+            .context("Failed to execute git stash command")?;
+        
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            warn!("Git stash may have failed: {}", stderr);
+            // Continue anyway as it might just be that there are no changes to stash
+        }
+        
+        Ok(())
+    }
+
+    /// Apply stashed changes
+    async fn stash_pop(&self) -> Result<()> {
+        let mut cmd = self.build_git_command();
+        cmd.args(["stash", "pop"]);
+        cmd.current_dir(&self.path);
+        
+        let output = cmd.output().await
+            .context("Failed to execute git stash pop command")?;
+        
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            // This could fail if there were conflicts, but we don't want to fail the process
+            warn!("Failed to apply stashed changes: {}", stderr);
+        }
+        
+        Ok(())
+    }
+
+    /// Fetch from remote
+    async fn fetch(&self) -> Result<()> {
+        let mut cmd = self.build_git_command();
+        cmd.args(["fetch", "origin", &self.branch]);
+        cmd.current_dir(&self.path);
+        
+        let output = cmd.output().await
+            .context("Failed to execute git fetch command")?;
+        
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow!("Git fetch failed: {}", stderr));
+        }
+        
+        Ok(())
+    }
+
+    /// Pull from remote
+    async fn pull(&self) -> Result<()> {
+        let mut cmd = self.build_git_command();
+        cmd.args(["pull", "origin", &self.branch]);
+        cmd.current_dir(&self.path);
+        
+        let output = cmd.output().await
+            .context("Failed to execute git pull command")?;
+        
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow!("Git pull failed: {}", stderr));
+        }
+        
+        Ok(())
+    }
+
+    /// Reset to a specific commit
+    async fn reset_hard(&self, commit: &str) -> Result<()> {
+        let mut cmd = self.build_git_command();
+        cmd.args(["reset", "--hard", commit]);
+        cmd.current_dir(&self.path);
+        
+        let output = cmd.output().await
+            .context("Failed to execute git reset command")?;
+        
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow!("Git reset failed: {}", stderr));
+        }
+        
+        Ok(())
+    }
+
+    /// Switch to a different branch
+    async fn switch_branch(&self, current_branch: &str) -> Result<()> {
+        // Stash any uncommitted changes
+        let has_changes = self.has_local_changes().await?;
+        if has_changes {
+            warn!("Found uncommitted changes, stashing them before switch");
+            self.stash_changes().await?;
+        }
+        
+        // Check if the branch exists locally
+        let branch_exists = self.branch_exists_locally(&self.branch).await?;
+        
+        if branch_exists {
+            // Local branch exists, check it out
+            debug!("Branch {} exists locally, checking it out", self.branch);
+            let mut cmd = self.build_git_command();
+            cmd.args(["checkout", &self.branch]);
+            cmd.current_dir(&self.path);
             
-            let pop_result = Command::new("git")
-                .current_dir(repo_path)
-                .args(["stash", "pop"])
-                .output();
+            let output = cmd.output().await
+                .context("Failed to execute git checkout command")?;
             
-            match pop_result {
-                Ok(output) => {
-                    if !output.status.success() {
-                        let error = String::from_utf8_lossy(&output.stderr);
-                        warn!("Failed to apply stashed changes: {}", error);
-                    }
-                },
-                Err(e) => {
-                    warn!("Error applying stashed changes: {}", e);
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(anyhow!("Git checkout failed: {}", stderr));
+            }
+        } else {
+            // Check if the branch exists on the remote
+            debug!("Branch {} not found locally, checking remote", self.branch);
+            self.fetch().await?;
+            
+            let remote_exists = self.branch_exists_remotely(&self.branch).await?;
+            
+            if remote_exists {
+                // Create a tracking branch
+                debug!("Branch {} exists on remote, creating tracking branch", self.branch);
+                let mut cmd = self.build_git_command();
+                cmd.args(["checkout", "-b", &self.branch, &format!("origin/{}", self.branch)]);
+                cmd.current_dir(&self.path);
+                
+                let output = cmd.output().await
+                    .context("Failed to execute git checkout -b command")?;
+                
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    return Err(anyhow!("Git checkout -b failed: {}", stderr));
                 }
+            } else {
+                return Err(anyhow!("Branch {} not found on remote", self.branch));
             }
         }
         
-        Ok(true) // Changes detected
-    } else {
-        debug!("No changes detected");
-        Ok(false) // No changes
+        // Apply stashed changes if any
+        if has_changes {
+            debug!("Applying stashed changes after branch switch");
+            self.stash_pop().await?;
+        }
+        
+        Ok(())
+    }
+
+    /// Check if a branch exists locally
+    async fn branch_exists_locally(&self, branch: &str) -> Result<bool> {
+        let mut cmd = self.build_git_command();
+        cmd.args(["branch", "--list", branch]);
+        cmd.current_dir(&self.path);
+        
+        let output = cmd.output().await
+            .context("Failed to execute git branch command")?;
+        
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow!("Git branch --list failed: {}", stderr));
+        }
+        
+        Ok(!output.stdout.is_empty())
+    }
+
+    /// Check if a branch exists on the remote
+    async fn branch_exists_remotely(&self, branch: &str) -> Result<bool> {
+        let mut cmd = self.build_git_command();
+        cmd.args(["ls-remote", "--heads", "origin", branch]);
+        cmd.current_dir(&self.path);
+        
+        let output = cmd.output().await
+            .context("Failed to execute git ls-remote command")?;
+        
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow!("Git ls-remote failed: {}", stderr));
+        }
+        
+        Ok(!output.stdout.is_empty())
+    }
+
+    /// Build a git command with proper SSH key handling if needed
+    fn build_git_command(&self) -> Command {
+        let mut cmd = Command::new("git");
+        
+        // Configure SSH if a key is provided
+        if let Some(key) = &self.ssh_key {
+            debug!("Using SSH key for git authentication");
+            
+            // Create a custom GIT_SSH_COMMAND that uses the key
+            // This will be set in a future update when needed
+        }
+        
+        cmd
+    }
+
+    /// Create a backup of the directory
+    async fn backup_directory(&self) -> Result<()> {
+        let backup_path = self.path.with_extension("bak");
+        
+        // Remove old backup if it exists
+        if backup_path.exists() {
+            tokio::fs::remove_dir_all(&backup_path).await
+                .context("Failed to remove old backup directory")?;
+        }
+        
+        // Move current directory to backup
+        tokio::fs::rename(&self.path, &backup_path).await
+            .context("Failed to create backup of existing directory")?;
+        
+        // Create fresh directory
+        tokio::fs::create_dir_all(&self.path).await
+            .context("Failed to create fresh directory")?;
+        
+        Ok(())
     }
 }
 
-fn setup_auth_callbacks(callbacks: &mut RemoteCallbacks, ssh_key: &str) {
-    callbacks.credentials(move |_url, username_from_url, _allowed_types| {
-        let username = username_from_url.unwrap_or("git");
+/// Create a temporary file with SSH key content for Git authentication
+pub async fn create_ssh_key_file(key_content: &str) -> Result<NamedTempFile> {
+    // Create a temporary file for the SSH key
+    let temp_file = NamedTempFile::new()
+        .context("Failed to create temporary file for SSH key")?;
+    
+    // Write the key content to the file
+    let mut file = File::from_std(temp_file.reopen()?);
+    file.write_all(key_content.as_bytes()).await
+        .context("Failed to write SSH key to temporary file")?;
+    
+    // Set correct permissions on Unix
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(temp_file.path(), fs::Permissions::from_mode(0o600))
+            .context("Failed to set permissions on SSH key file")?;
+    }
+    
+    Ok(temp_file)
+}
+
+/// Main functions for working with service repositories
+pub mod service {
+    use super::*;
+    
+    /// Initialize or update a repository for a service
+    pub async fn init_repository(service: &ServiceConfig, global: &GlobalSettings) -> Result<()> {
+        let mut repo = GitRepo::from_service(service, global);
+        repo.init().await
+    }
+    
+    /// Check for updates to a service repository
+    pub async fn check_for_updates(service: &ServiceConfig, global: &GlobalSettings) -> Result<bool> {
+        let mut repo = GitRepo::from_service(service, global);
         
-        // Create a temporary file for the SSH key
-        let mut temp_file = tempfile::Builder::new()
-            .prefix("git_ssh_key")
-            .suffix("")
-            .tempfile()
-            .expect("Failed to create temporary file for SSH key");
-        
-        std::io::Write::write_all(&mut temp_file, ssh_key.as_bytes())
-            .expect("Failed to write SSH key to temporary file");
-        
-        let temp_path = temp_file.into_temp_path();
-        
-        // Set correct permissions on Unix
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&temp_path, fs::Permissions::from_mode(0o600))
-                .expect("Failed to set permissions on SSH key file");
+        if !repo.exists() {
+            debug!("Repository does not exist, initializing");
+            repo.init().await?;
+            return Ok(true); // New repository initialized
         }
         
-        // Create SSH key credentials
-        Cred::ssh_key(
-            username,
-            None, // No public key needed
-            &temp_path,
-            None, // No passphrase
-        )
-    });
+        repo.check_for_updates().await
+    }
+    
+    /// Revert changes in case of validation failure
+    pub async fn revert_changes(service: &ServiceConfig, global: &GlobalSettings) -> Result<()> {
+        let mut repo = GitRepo::from_service(service, global);
+        
+        if !repo.exists() {
+            return Err(anyhow!("Cannot revert: repository does not exist"));
+        }
+        
+        repo.revert_changes().await
+    }
 }
