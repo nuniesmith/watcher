@@ -17,7 +17,7 @@
       "monitor_logs": true,
       "log_tail_lines": 100,
       "permissions": {
-        "fix": true,
+        "fix": false,
         "user": "nginx-app",
         "group": "nginx-app"
       },

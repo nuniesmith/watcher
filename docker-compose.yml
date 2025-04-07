@@ -1,5 +1,4 @@
 services:
-  # Config watcher service
   watcher:
     container_name: config_watcher
     image: ${DOCKER_REGISTRY:-nuniesmith}/watcher:${TAG:-latest}
