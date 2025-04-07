@@ -29,63 +29,8 @@
         "default_site_enabled": true,
         "config_test_before_restart": true
       }
-    },
-    {
-      "name": "api",
-      "container_name": "api_service",
-      "service_type": "custom",
-      "repo_url": "https://github.com/nuniesmith/api.git",
-      "branch": "develop",
-      "local_path": "/app/config/api",
-      "use_docker_compose": true,
-      "docker_compose_file": "docker-compose.yml",
-      "restart_command": "docker compose -f /app/config/api/docker-compose.yml restart api_service",
-      "validation_command": "docker exec -t api_service /app/scripts/validate-config.sh",
-      "disable_restart": false,
-      "healthcheck_url": "https://hc-ping.com/your-api-check-id",
-      "auto_fix": true,
-      "monitor_logs": true,
-      "log_tail_lines": 200,
-      "permissions": {
-        "fix": true,
-        "user": "app",
-        "group": "app"
-      },
-      "custom_settings": {
-        "config_dir": "/app/config",
-        "env_file": ".env.production",
-        "port": 3000,
-        "rate_limit": 100
-      }
-    },
-    {
-      "name": "database",
-      "container_name": "postgres_db",
-      "service_type": "generic",
-      "repo_url": "https://github.com/nuniesmith/db-config.git",
-      "branch": "main",
-      "local_path": "/app/config/db",
-      "use_docker_compose": true,
-      "docker_compose_file": "/path/to/compose.yml",
-      "restart_command": "docker compose -f /path/to/compose.yml restart postgres_db",
-      "validation_command": "docker exec -t postgres_db pg_isready -U postgres",
-      "disable_restart": false,
-      "healthcheck_url": "https://hc-ping.com/your-db-check-id",
-      "auto_fix": false,
-      "monitor_logs": true,
-      "log_tail_lines": 50,
-      "permissions": {
-        "fix": true,
-        "user": "postgres",
-        "group": "postgres"
-      },
-      "custom_settings": {
-        "data_dir": "/var/lib/postgresql/data",
-        "backup_enabled": true,
-        "max_connections": 100,
-        "timeout_seconds": 30
-      }
     }
+
   ],
   "global_settings": {
     "watch_interval": 60,
