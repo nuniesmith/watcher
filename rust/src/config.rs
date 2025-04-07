@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -559,14 +559,14 @@ impl Config {
     /// Create a simplified Nginx config for the docker module
     pub fn to_nginx_config(&self, service_idx: usize) -> Result<nginx::Config> {
         if service_idx >= self.services.len() {
-            return Err(anyhow::anyhow!("Service index out of bounds"));
+            return Err(anyhow!("Service index out of bounds"));
         }
         
         let service = &self.services[service_idx];
         
         // Only create an nginx config for Nginx service types
         if service.service_type != ServiceType::Nginx {
-            return Err(anyhow::anyhow!("Service is not an Nginx service"));
+            return Err(anyhow!("Service is not an Nginx service"));
         }
         
         let compose_dir = service.get_compose_dir(&self.global_settings.default_compose_dir)
@@ -582,6 +582,31 @@ impl Config {
             use_docker_compose: service.use_docker_compose || self.global_settings.use_docker_compose,
             disable_restart: service.disable_restart || self.global_settings.disable_restart,
             monitor_logs: service.effective_monitor_logs(self.global_settings.monitor_logs),
+            log_tail_lines: service.log_tail_lines,
+            force_rebuild: None,
+        })
+    }
+    
+    /// Create a simplified Nginx config for a specific service
+    pub fn make_nginx_config(service: &ServiceConfig, global: &GlobalSettings) -> Result<nginx::Config> {
+        // Only create an nginx config for Nginx service types
+        if service.service_type != ServiceType::Nginx {
+            return Err(anyhow!("Service is not an Nginx service"));
+        }
+        
+        let compose_dir = service.get_compose_dir(&global.default_compose_dir)
+            .unwrap_or_else(|| PathBuf::from("."));
+            
+        let compose_file = service.get_compose_file(&global.default_compose_file)
+            .unwrap_or_else(|| "docker-compose.yml".to_string());
+        
+        Ok(nginx::Config {
+            nginx_container_name: service.container_name.clone(),
+            compose_dir,
+            compose_file,
+            use_docker_compose: service.use_docker_compose || global.use_docker_compose,
+            disable_restart: service.disable_restart || global.disable_restart,
+            monitor_logs: service.effective_monitor_logs(global.monitor_logs),
             log_tail_lines: service.log_tail_lines,
             force_rebuild: None,
         })

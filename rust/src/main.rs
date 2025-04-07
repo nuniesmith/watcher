@@ -10,19 +10,12 @@ use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio::time::{sleep, Duration};
 
-mod config;
-mod docker_utils;
-mod git;
-mod nginx;
-mod service;
-mod utils;
-
-use config::{Config, GlobalSettings, ServiceConfig, ServiceType};
-use docker_utils::ContainerStatus;
-use git::service as git_service;
-use nginx::{check_nginx_logs, restart_nginx};
-use service::{check_service_status, restart_service, run_validation};
-use utils::fix_permissions;
+use crate::config::{Config, GlobalSettings, ServiceConfig, ServiceType};
+use crate::docker_utils::ContainerStatus;
+use crate::git::service as git_service;
+use crate::nginx::{check_nginx_logs, restart_nginx};
+use crate::service::{check_service_status, restart_service, run_validation};
+use crate::utils::fix_permissions;
 
 /// Main entry point for the application
 #[tokio::main]
