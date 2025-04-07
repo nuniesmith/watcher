@@ -5,7 +5,7 @@
 # Stage 1: Rust Config Watcher Builder
 # -----------------------------
 FROM rust:alpine AS watcher-builder
-# Install build dependencies with proper version pinning
+# Install build dependencies
 RUN apk add --no-cache \
     build-base \
     openssl-dev \
@@ -41,7 +41,7 @@ ARG DOCKER_GID=986
 # Create a non-root user for better security
 RUN addgroup -S watcher && \
     adduser -S -G watcher watcher
-# Install required packages for runtime - with proper version pinning
+# Install required packages for runtime
 RUN apk update && \
     apk add --no-cache \
     git \
@@ -53,7 +53,8 @@ RUN apk update && \
     libgcc \
     ca-certificates \
     shadow \
-    jq
+    jq \
+    perl
 # Set up docker group with same GID as host, handling potential GID conflicts
 RUN if getent group ${DOCKER_GID}; then \
     existing_group=$(getent group ${DOCKER_GID} | cut -d: -f1); \
