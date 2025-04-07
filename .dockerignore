@@ -1,0 +1,71 @@
+# .dockerignore file
+
+# Python cache and bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# Git repository files
+.git/
+
+# macOS system files
+.DS_Store
+
+# Local environment and virtual environments
+#.env
+*.venv
+*.log
+
+# Pytest cache
+.pytest_cache/
+
+# Version control
+.git
+.gitignore
+.github
+
+# Development files
+**/.DS_Store
+**/.vscode
+**/.idea
+**/*.md
+**/README*
+LICENSE
+**/docs
+**/examples
+**/tests
+**/*.test.js
+**/*.spec.js
+
+# Build artifacts
+**/node_modules
+**/target
+**/build
+**/dist
+**/*.o
+**/*.a
+**/*.so
+**/*.dll
+**/*.dylib
+
+# Configuration files not needed for build
+.editorconfig
+.eslintrc
+.prettierrc
+.env*
+docker-compose*.yml
+
+# Logs and temporary files
+**/logs
+**/*.log
+**/tmp
+**/temp
+
+# Specific project paths to exclude
+# Add any large directories that aren't needed in the build
+
+# Keep essential files
+docker/nginx/entrypoint.sh
+docker/nginx/healthcheck.sh
+docker/app/entrypoint.sh
+docker/app/healthcheck.sh

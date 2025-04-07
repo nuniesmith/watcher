@@ -1,0 +1,1 @@
+docker compose down && clear && docker compose build && docker compose up
